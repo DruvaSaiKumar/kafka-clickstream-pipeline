@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from clickstream import DLQ_TOPIC, ENRICHED_TOPIC, GROUP_ID, RAW_TOPIC, SESSIONS_TOPIC  # noqa: E402
-from clickstream.admin import consumer_lag, ensure_topics  # noqa: E402
+from clickstream.admin import consumer_lag, ensure_topics, warmup_cluster  # noqa: E402
 from clickstream.consumer import run as run_consumer  # noqa: E402
 from clickstream.generator import generate_events  # noqa: E402
 from clickstream.producer import produce_lines  # noqa: E402
@@ -35,6 +35,9 @@ def main() -> int:
     parser.add_argument("--users", type=int, default=150)
     parser.add_argument("--group-id", default=GROUP_ID)
     args = parser.parse_args()
+
+    print("Warming up the cluster (forces __consumer_offsets / __transaction_state to settle)...")
+    warmup_cluster(args.bootstrap)
 
     ensure_topics(args.bootstrap, {RAW_TOPIC: 3, DLQ_TOPIC: 1, ENRICHED_TOPIC: 3, SESSIONS_TOPIC: 1})
 

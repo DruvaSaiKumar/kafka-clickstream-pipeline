@@ -21,13 +21,17 @@ that set is not persisted. A restart forgets it, so a replay across a restart co
 processed twice. A production version would persist de-dup state (or size the downstream writes to
 be idempotent on their own) instead of relying on this process's memory.
 
-**A retry budget for coordinator errors, separate from "caught up."** The consumer decides it has
-caught up on a topic after several consecutive empty polls. The very first time a brand-new
-consumer group commits against a freshly started broker, Kafka's internal `__consumer_offsets`
-topic and its coordinator can take a few seconds to settle, which shows up as a `NOT_COORDINATOR`
-error on that first commit attempt. Counting that toward "caught up" was an actual bug during
-development (see below) — the fix keeps a separate, more generous retry budget for retriable broker
-errors, so a slow-but-recovering coordinator is not mistaken for "no more data."
+**A one-time cluster warm-up, run before any timed loop.** The very first time a fresh broker's
+`__consumer_offsets` and `__transaction_state` internal topics are used — by the first-ever
+idempotent produce and the first-ever consumer-group commit — their coordinators take a
+noticeable, environment-dependent amount of time to settle (a couple of seconds on a local
+machine, sometimes closer to a minute on a shared CI runner). `admin.warmup_cluster()` forces this
+to happen up front, by actually running a produce-and-commit cycle to completion with a generous
+retry loop, before either the pytest session or `run_demo` starts anything that measures "have we
+caught up" on a clock. The consumer's own poll loop also tolerates retriable broker errors
+separately from its idle-detection counter, as defense in depth, but the warm-up is what actually
+fixed this (see below) — a fixed retry count within the timed loop turned out not to be a reliable
+substitute for paying the cold-start cost somewhere untimed.
 
 **Session windowing is hand-rolled, not Kafka Streams or Faust.** `windowing.py` is plain Python with
 no Kafka import at all, so the rule for when a session closes (a client-side session id change, or
@@ -48,15 +52,24 @@ integration tests run against a bounded, already-fully-produced input, so waitin
 30-minute gap isn't practical; they call `close_all()` once the consumer has caught up, so every
 session in the finite input is accounted for in the results.
 
-## A real bug this caught
+## Real bugs this caught
 
-Early on, `run()` used `consumer.subscribe()` and treated every consumer error (including a
-transient `NOT_COORDINATOR` right after a topic's first-ever use) the same as "no more messages,"
-so the very first integration test run against a freshly started broker reported zero consumed
-messages — the coordinator hiccup ran out the idle-poll budget before real data ever arrived. Fixed
-by switching to static assignment and giving retriable broker errors their own retry budget,
-separate from idle detection (both described above). Re-running the exact same test against a
-freshly reformatted, cold broker afterward passed cleanly.
+Getting this to actually run against a live broker, twice over (locally, then again in CI), surfaced
+two genuine timing bugs that no amount of mocking would have found:
+
+1. Early on, `run()` used `consumer.subscribe()` and treated every consumer error (including a
+   transient `NOT_COORDINATOR` right after a topic's first-ever use) the same as "no more
+   messages," so the very first integration test run against a freshly started broker reported
+   zero consumed messages. Fixed by switching to static partition assignment (above) and giving
+   retriable broker errors their own retry budget, separate from idle detection.
+2. That fix was enough on this development machine, but CI's Kafka service container failed the
+   same test the same way on its first run — a slower environment made the one-time coordinator
+   cold-start cost exceed even the retry budget from fix #1. The real fix was `warmup_cluster()`
+   (above): pay that cost once, deliberately, outside of any loop with a timing assumption,
+   instead of sizing a retry budget to guess at how slow "slow" might get.
+
+Both were fixed by actually running the pipeline against real brokers in two different
+environments, not by reasoning about the client library's behavior in the abstract.
 
 ## What is not verified
 
